@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -57,15 +57,6 @@ async def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS stats (
-                date TEXT PRIMARY KEY,
-                new_users INTEGER DEFAULT 0,
-                deposits REAL DEFAULT 0,
-                withdraws REAL DEFAULT 0,
-                invests REAL DEFAULT 0
-            )
-        """)
         await db.commit()
 
 # === ДОБАВЛЕНИЕ В ИСТОРИЮ ===
@@ -84,9 +75,7 @@ async def cmd_start(message: Message):
     args = message.text.split()
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            user = await cursor.fetchone()
-        
+        user = await db.execute_fetchone("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         is_new = user is None
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         
@@ -129,11 +118,13 @@ async def cmd_start(message: Message):
 async def show_balance(call: CallbackQuery):
     user_id = call.from_user.id
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT balance, invest_sum, referral_earnings FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            balance = row[0] if row else 0
-            invest = row[1] if row else 0
-            ref_earnings = row[2] if row else 0
+        row = await db.execute_fetchone(
+            "SELECT balance, invest_sum, referral_earnings FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        balance = row[0] if row else 0
+        invest = row[1] if row else 0
+        ref_earnings = row[2] if row else 0
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu")]
@@ -155,11 +146,17 @@ async def show_referrals(call: CallbackQuery):
     user_id = call.from_user.id
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,)) as cursor:
-            ref_count = (await cursor.fetchone())[0]
-        async with db.execute("SELECT referral_earnings FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            ref_earnings = row[0] if row else 0
+        ref_count_row = await db.execute_fetchone(
+            "SELECT COUNT(*) FROM users WHERE referrer_id = ?",
+            (user_id,)
+        )
+        ref_count = ref_count_row[0] if ref_count_row else 0
+        
+        earnings_row = await db.execute_fetchone(
+            "SELECT referral_earnings FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        ref_earnings = earnings_row[0] if earnings_row else 0
     
     ref_link = f"https://t.me/{(await bot.get_me()).username}?start=ref{user_id}"
     
@@ -187,17 +184,16 @@ async def show_history(call: CallbackQuery):
     user_id = call.from_user.id
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute(
+        history_rows = await db.execute_fetchall(
             "SELECT type, amount, status, created_at FROM history WHERE user_id = ? ORDER BY created_at DESC LIMIT 10",
             (user_id,)
-        ) as cursor:
-            history = await cursor.fetchall()
+        )
     
-    if not history:
+    if not history_rows:
         text = "📊 *ИСТОРИЯ ОПЕРАЦИЙ*\n\nУ тебя пока нет операций."
     else:
         text = "📊 *ИСТОРИЯ ОПЕРАЦИЙ (последние 10)*\n\n"
-        for op in history:
+        for op in history_rows:
             type_map = {
                 "deposit": "📥 Пополнение",
                 "withdraw": "📤 Вывод",
@@ -276,10 +272,8 @@ async def process_deposit(message: Message):
         await db.commit()
         await add_history(user_id, "deposit", amount, "pending", f"Заявка на пополнение")
     
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            referrer_id = row[0] if row else 0
+    referrer_row = await db.execute_fetchone("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
+    referrer_id = referrer_row[0] if referrer_row else 0
     
     await bot.send_message(
         ADMIN_ID,
@@ -313,37 +307,44 @@ async def confirm_deposit(message: Message):
         return
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT deposit_request, referrer_id FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row or row[0] == 0:
-                await message.answer("❌ Нет активных заявок")
-                return
+        row = await db.execute_fetchone(
+            "SELECT deposit_request, referrer_id FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        if not row or row[0] == 0:
+            await message.answer("❌ Нет активных заявок")
+            return
+        
+        amount = row[0]
+        referrer_id = row[1]
+        
+        await db.execute(
+            "UPDATE users SET balance = balance + ?, deposit_request = 0 WHERE user_id = ?",
+            (amount, user_id)
+        )
+        
+        if referrer_id and referrer_id != 0:
+            bonus = amount * REFERRAL_BONUS
+            await db.execute(
+                "UPDATE users SET balance = balance + ?, referral_earnings = referral_earnings + ? WHERE user_id = ?",
+                (bonus, bonus, referrer_id)
+            )
+            await add_history(referrer_id, "referral", bonus, "completed", f"Бонус за пополнение реферала {user_id}")
             
-            amount = row[0]
-            referrer_id = row[1]
-            
-            await db.execute("UPDATE users SET balance = balance + ?, deposit_request = 0 WHERE user_id = ?", (amount, user_id))
-            
-            if referrer_id and referrer_id != 0:
-                bonus = amount * REFERRAL_BONUS
-                await db.execute("UPDATE users SET balance = balance + ?, referral_earnings = referral_earnings + ? WHERE user_id = ?", 
-                               (bonus, bonus, referrer_id))
-                await add_history(referrer_id, "referral", bonus, "completed", f"Бонус за пополнение реферала {user_id}")
-                
-                try:
-                    await bot.send_message(
-                        referrer_id,
-                        f"🎁 *Реферальный бонус!*\n\n"
-                        f"Ваш реферал пополнил баланс на `{amount:,.0f}₽`\n"
-                        f"💰 Вам начислено `{bonus:,.0f}₽` (5%)\n\n"
-                        f"✅ Спасибо, что с нами!",
-                        parse_mode="Markdown"
-                    )
-                except:
-                    pass
-            
-            await db.commit()
-            await add_history(user_id, "deposit", amount, "completed", f"Пополнение подтверждено")
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🎁 *Реферальный бонус!*\n\n"
+                    f"Ваш реферал пополнил баланс на `{amount:,.0f}₽`\n"
+                    f"💰 Вам начислено `{bonus:,.0f}₽` (5%)\n\n"
+                    f"✅ Спасибо, что с нами!",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+        
+        await db.commit()
+        await add_history(user_id, "deposit", amount, "completed", f"Пополнение подтверждено")
     
     await message.answer(f"✅ Баланс пользователя {user_id} пополнен на {amount:,.0f}₽")
     await bot.send_message(
@@ -385,9 +386,8 @@ async def process_multiply(message: Message):
         return
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            balance = row[0] if row else 0
+        balance_row = await db.execute_fetchone("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        balance = balance_row[0] if balance_row else 0
         
         if amount > balance:
             await message.answer(f"❌ Недостаточно средств. Баланс: `{balance:,.0f}₽`")
@@ -419,23 +419,27 @@ async def percent_worker():
     while True:
         await asyncio.sleep(3600)
         async with aiosqlite.connect("users.db") as db:
-            async with db.execute("SELECT user_id, invest_sum FROM users WHERE invest_sum > 0") as cursor:
-                users = await cursor.fetchall()
-                for user_id, invest in users:
-                    profit = invest * 0.029
-                    await db.execute("UPDATE users SET invest_sum = invest_sum + ? WHERE user_id = ?", (profit, user_id))
-                    await add_history(user_id, "percent", profit, "completed", f"Начисление процентов")
-                    try:
-                        await bot.send_message(
-                            user_id,
-                            f"📈 *НАЧИСЛЕНИЕ ПРОЦЕНТОВ*\n\n"
-                            f"➕ +`{profit:,.2f}₽`\n"
-                            f"💰 В работе: `{invest + profit:,.2f}₽`\n\n"
-                            f"⏳ Следующее начисление через 60 минут",
-                            parse_mode="Markdown"
-                        )
-                    except:
-                        pass
+            users = await db.execute_fetchall(
+                "SELECT user_id, invest_sum FROM users WHERE invest_sum > 0"
+            )
+            for user_id, invest in users:
+                profit = invest * 0.029
+                await db.execute(
+                    "UPDATE users SET invest_sum = invest_sum + ? WHERE user_id = ?",
+                    (profit, user_id)
+                )
+                await add_history(user_id, "percent", profit, "completed", f"Начисление процентов")
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"📈 *НАЧИСЛЕНИЕ ПРОЦЕНТОВ*\n\n"
+                        f"➕ +`{profit:,.2f}₽`\n"
+                        f"💰 В работе: `{invest + profit:,.2f}₽`\n\n"
+                        f"⏳ Следующее начисление через 60 минут",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
             await db.commit()
 
 # === ВЫВОД СРЕДСТВ ===
@@ -470,9 +474,8 @@ async def process_withdraw(message: Message):
         return
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            balance = row[0] if row else 0
+        balance_row = await db.execute_fetchone("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        balance = balance_row[0] if balance_row else 0
         
         if amount > balance:
             await message.answer(f"❌ Недостаточно средств. Баланс: `{balance:,.0f}₽`")
@@ -502,7 +505,7 @@ async def process_withdraw(message: Message):
     await message.answer(
         f"✅ *Заявка на вывод отправлена!*\n\n"
         f"💰 Сумма: `{amount:,.0f}₽`\n"
-        f"💳 Карта: `{card_number}`\n"
+        f"💳 Карта: `{card_number[-4:]}`\n"
         f"⏳ Ожидай подтверждения (1-3 минуты)",
         parse_mode="Markdown"
     )
@@ -520,59 +523,35 @@ async def confirm_withdraw(message: Message):
         return
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT withdraw_request, card_number FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if not row or row[0] == 0:
-                await message.answer("❌ Нет активных заявок на вывод")
-                return
-            
-            amount = row[0]
-            card = row[1]
-            
-            await db.execute(
-                "UPDATE users SET balance = balance - ?, withdraw_request = 0 WHERE user_id = ?",
-                (amount, user_id)
-            )
-            await db.commit()
-            await add_history(user_id, "withdraw", amount, "completed", f"Вывод подтвержден, карта: {card[-4:]}")
+        row = await db.execute_fetchone(
+            "SELECT withdraw_request, card_number FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        if not row or row[0] == 0:
+            await message.answer("❌ Нет активных заявок на вывод")
+            return
+        
+        amount = row[0]
+        card = row[1]
+        
+        await db.execute(
+            "UPDATE users SET balance = balance - ?, withdraw_request = 0 WHERE user_id = ?",
+            (amount, user_id)
+        )
+        await db.commit()
+        await add_history(user_id, "withdraw", amount, "completed", f"Вывод подтвержден, карта: {card[-4:]}")
     
     await message.answer(f"✅ Вывод {amount:,.0f}₽ пользователю {user_id} подтверждён")
     await bot.send_message(
         user_id,
         f"✅ *Вывод подтверждён!*\n\n"
         f"💰 Сумма: `{amount:,.0f}₽`\n"
-        f"💳 Карта: `{card}`\n\n"
+        f"💳 Карта: `{card[-4:]}`\n\n"
         f"⏳ Деньги поступят в течение 1-3 минут",
         parse_mode="Markdown"
     )
 
-# === ДОБАВИТЬ БАЛАНС (АДМИН) ===
-@dp.message(Command("add"))
-async def add_balance(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        parts = message.text.split()
-        user_id = int(parts[1])
-        amount = float(parts[2])
-    except:
-        await message.answer("Используй: /add 123456789 1000")
-        return
-    
-    async with aiosqlite.connect("users.db") as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-        await db.commit()
-        await add_history(user_id, "admin", amount, "completed", f"Начислено администратором")
-    
-    await message.answer(f"✅ Баланс пользователя {user_id} увеличен на {amount:,.0f}₽")
-    await bot.send_message(
-        user_id,
-        f"💰 *Вам начислено {amount:,.0f}₽!*",
-        parse_mode="Markdown"
-    )
-
-# === ПРОЦЕНТЫ ИНФО ===
+# === ПРОЦЕНТЫ ИНФО (ИСПРАВЛЕНО) ===
 @dp.callback_query(lambda c: c.data == "percent_info")
 async def percent_info(call: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -637,6 +616,32 @@ async def info(call: CallbackQuery):
 async def copy_ref(call: CallbackQuery):
     await call.answer("Ссылка скопирована! 📋", show_alert=False)
 
+# === ДОБАВИТЬ БАЛАНС (АДМИН) ===
+@dp.message(Command("add"))
+async def add_balance(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        user_id = int(parts[1])
+        amount = float(parts[2])
+    except:
+        await message.answer("Используй: /add 123456789 1000")
+        return
+    
+    async with aiosqlite.connect("users.db") as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+        await add_history(user_id, "admin", amount, "completed", f"Начислено администратором")
+    
+    await message.answer(f"✅ Баланс пользователя {user_id} увеличен на {amount:,.0f}₽")
+    await bot.send_message(
+        user_id,
+        f"💰 *Вам начислено {amount:,.0f}₽!*",
+        parse_mode="Markdown"
+    )
+
 # === СТАТИСТИКА (АДМИН) ===
 @dp.message(Command("stats"))
 async def stats(message: Message):
@@ -644,20 +649,32 @@ async def stats(message: Message):
         return
     
     async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            total_users = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE('now')") as cursor:
-            new_users_today = (await cursor.fetchone())[0]
-        async with db.execute("SELECT SUM(balance) FROM users") as cursor:
-            total_balance = (await cursor.fetchone())[0] or 0
-        async with db.execute("SELECT SUM(invest_sum) FROM users") as cursor:
-            total_invest = (await cursor.fetchone())[0] or 0
-        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'deposit' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
-            deposits_today = (await cursor.fetchone())[0] or 0
-        async with db.execute("SELECT SUM(amount) FROM history WHERE type = 'withdraw' AND status = 'completed' AND DATE(created_at) = DATE('now')") as cursor:
-            withdraws_today = (await cursor.fetchone())[0] or 0
-        async with db.execute("SELECT COUNT(*) FROM history WHERE status = 'pending'") as cursor:
-            pending_requests = (await cursor.fetchone())[0]
+        total_users_row = await db.execute_fetchone("SELECT COUNT(*) FROM users")
+        total_users = total_users_row[0] if total_users_row else 0
+        
+        new_users_row = await db.execute_fetchone(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) = DATE('now')"
+        )
+        new_users_today = new_users_row[0] if new_users_row else 0
+        
+        total_balance_row = await db.execute_fetchone("SELECT SUM(balance) FROM users")
+        total_balance = total_balance_row[0] or 0
+        
+        total_invest_row = await db.execute_fetchone("SELECT SUM(invest_sum) FROM users")
+        total_invest = total_invest_row[0] or 0
+        
+        deposits_row = await db.execute_fetchone(
+            "SELECT SUM(amount) FROM history WHERE type = 'deposit' AND status = 'completed' AND DATE(created_at) = DATE('now')"
+        )
+        deposits_today = deposits_row[0] or 0
+        
+        withdraws_row = await db.execute_fetchone(
+            "SELECT SUM(amount) FROM history WHERE type = 'withdraw' AND status = 'completed' AND DATE(created_at) = DATE('now')"
+        )
+        withdraws_today = withdraws_row[0] or 0
+        
+        pending_row = await db.execute_fetchone("SELECT COUNT(*) FROM history WHERE status = 'pending'")
+        pending_requests = pending_row[0] or 0
     
     await message.answer(
         f"📊 *СТАТИСТИКА БОТА*\n\n"
@@ -702,4 +719,17 @@ async def back_to_menu(call: CallbackQuery):
     
     await call.message.edit_text(
         f"🚀 *Главное меню*\n\n"
-       
+        f"👇 Выбери действие:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
+# === ЗАПУСК ===
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await init_db()
+    asyncio.create_task(percent_worker())
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
